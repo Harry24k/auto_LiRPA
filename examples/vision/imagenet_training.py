@@ -1,7 +1,5 @@
 import random
-import sys
 import time
-import multiprocessing
 import argparse
 import multiprocessing
 import torch.optim as optim
@@ -13,7 +11,7 @@ from auto_LiRPA.utils import MultiAverageMeter
 import models
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
-from auto_LiRPA.eps_scheduler import LinearScheduler, AdaptiveScheduler, SmoothedScheduler, FixedScheduler
+from auto_LiRPA.eps_scheduler import AdaptiveScheduler, FixedScheduler, SmoothedScheduler
 
 
 class Logger(object):
@@ -40,22 +38,22 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--verify", action="store_true", help='verification mode, do not train')
 parser.add_argument("--load", type=str, default="", help='Load pretrained model')
 parser.add_argument("--device", type=str, default="cuda", choices=["cpu", "cuda"], help='use cpu or cuda')
-parser.add_argument("--data_dir", type=str, default="data/tinyImageNet/tiny-imagenet-200",
+parser.add_argument("--data_dir", type=str, default="data/ImageNet64",
                     help='dir of dataset')
 parser.add_argument("--seed", type=int, default=100, help='random seed')
 parser.add_argument("--eps", type=float, default=1. / 255, help='Target training epsilon')
 parser.add_argument("--norm", type=float, default='inf', help='p norm for epsilon perturbation')
 parser.add_argument("--bound_type", type=str, default="CROWN-IBP",
                     choices=["IBP", "CROWN-IBP", "CROWN"], help='method of bound analysis')
-parser.add_argument("--model", type=str, default="wide_resnet_imagenet64",
-                    help='model name (cnn_7layer_bn_imagenet, ResNeXt_imagenet64, ResNeXt_imagenet64)')
-parser.add_argument("--num_epochs", type=int, default=600, help='number of total epochs')
-parser.add_argument("--batch_size", type=int, default=128, help='batch size')
-parser.add_argument("--lr", type=float, default=5e-4, help='learning rate')
-parser.add_argument("--lr_decay_milestones", nargs='+', type=int, default=[600, 700], help='learning rate dacay milestones')
+parser.add_argument("--model", type=str, default="wide_resnet_imagenet64_1000class",
+                    help='model name (mlp_3layer, cnn_4layer, cnn_6layer, cnn_7layer, resnet)')
+parser.add_argument("--num_epochs", type=int, default=240, help='number of total epochs')
+parser.add_argument("--batch_size", type=int, default=125, help='batch size')
+parser.add_argument("--lr", type=float, default=1e-3, help='learning rate')
+parser.add_argument("--lr_decay_milestones", nargs='+', type=int, default=[200, 220], help='learning rate dacay milestones')
 parser.add_argument("--scheduler_name", type=str, default="SmoothedScheduler",
                     choices=["LinearScheduler", "AdaptiveScheduler", "SmoothedScheduler"], help='epsilon scheduler')
-parser.add_argument("--scheduler_opts", type=str, default="start=100,length=400,mid=0.4", help='options for epsilon scheduler')
+parser.add_argument("--scheduler_opts", type=str, default="start=100,length=80", help='options for epsilon scheduler')
 parser.add_argument("--bound_opts", type=str, default=None, choices=["same-slope", "zero-lb", "one-lb"],
                     help='bound options')
 parser.add_argument('--clip_grad_norm', type=float, default=8.0)
@@ -63,17 +61,17 @@ parser.add_argument('--clip_grad_norm', type=float, default=8.0)
 args = parser.parse_args()
 
 exp_name = args.model + '_b' + str(args.batch_size) + str(args.bound_type) + '_epoch' + str(
-    args.num_epochs) + '_' + args.scheduler_opts + '_ImageNet_' + str(args.eps)[:6]
-os.makedirs('saved_models/', exist_ok=True)
+    args.num_epochs) + '_' + args.scheduler_opts + '_' + str(args.eps)[:6]
+
 if args.verify:
-    logger = Logger(open('saved_models/' + exp_name + '_test.log', "w"))
+    logger = Logger(open('saved_models/' + exp_name + '_test.log', "a"))
 else:
-    logger = Logger(open('saved_models/' + exp_name + '.log', "w"))
+    logger = Logger(open('saved_models/' + exp_name + '.log', "a"))
 
 
 def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method='robust', loss_fusion=True,
           final_node_name=None):
-    num_class = 200
+    num_class = 1000
     meter = MultiAverageMeter()
     if train:
         model.train()
@@ -108,7 +106,8 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
                 lb, ub = ilb, iub
             else:
                 clb, cub = model(method_opt="compute_bounds", IBP=False, C=c, method='backward',
-                                 bound_lower=bound_lower, bound_upper=bound_upper, final_node_name=final_node_name, no_replicas=True)
+                                 bound_lower=bound_lower, bound_upper=bound_upper, final_node_name=final_node_name,
+                                 no_replicas=True)
                 if loss_fusion:
                     ub = cub * factor + iub * (1 - factor)
                 else:
@@ -131,6 +130,7 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
         start = time.time()
         eps_scheduler.step_batch()
         eps = eps_scheduler.get_eps()
+        # eps = 187e-12
         # For small eps just use natural training, no need to compute LiRPA bounds
         batch_method = method
         if eps < 1e-50:
@@ -201,7 +201,7 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
                 meter.update('Verified_Err', torch.sum((lb < 0).any(dim=1)).item() / data.size(0), data.size(0))
         meter.update('Time', time.time() - start)
 
-        if (i + 1) % 250 == 0 and train:
+        if (i + 1) % 500 == 0 and train:
             logger.log('[{:2d}:{:4d}]: eps={:.12f} {}'.format(t, i + 1, eps, meter))
 
     logger.log('[{:2d}:{:4d}]: eps={:.12f} {}'.format(t, i + 1, eps, meter))
@@ -219,12 +219,7 @@ def main(args):
     epoch = 0
     if args.load:
         checkpoint = torch.load(args.load)
-        epoch, state_dict = checkpoint['epoch'], checkpoint['state_dict']
-        opt_state = None
-        try:
-            opt_state = checkpoint['optimizer']
-        except KeyError:
-            print('no opt_state found')
+        epoch, state_dict, opt_state = checkpoint['epoch'], checkpoint['state_dict'], checkpoint['optimizer']
         for k, v in state_dict.items():
             assert torch.isnan(v).any().cpu().numpy() == 0 and torch.isinf(v).any().cpu().numpy() == 0
         model_ori.load_state_dict(state_dict)
@@ -232,7 +227,7 @@ def main(args):
 
     ## Step 2: Prepare dataset as usual
     dummy_input = torch.randn(1, 3, 56, 56)
-    normalize = transforms.Normalize(mean=[0.4802, 0.4481, 0.3975], std=[0.2302, 0.2265, 0.2262])
+    normalize = transforms.Normalize(mean=[0.4815, 0.4578, 0.4082], std=[0.2153, 0.2111, 0.2121])
     train_data = datasets.ImageFolder(args.data_dir + '/train',
                                       transform=transforms.Compose([
                                           transforms.RandomHorizontalFlip(),
@@ -240,7 +235,7 @@ def main(args):
                                           transforms.ToTensor(),
                                           normalize,
                                       ]))
-    test_data = datasets.ImageFolder(args.data_dir + '/val',
+    test_data = datasets.ImageFolder(args.data_dir + '/test',
                                      transform=transforms.Compose([
                                          # transforms.RandomResizedCrop(64, scale=(0.875, 0.875), ratio=(1., 1.)),
                                          transforms.CenterCrop(56),
@@ -249,14 +244,14 @@ def main(args):
 
     train_data = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=True, pin_memory=True,
                                              num_workers=min(multiprocessing.cpu_count(), 4))
-    test_data = torch.utils.data.DataLoader(test_data, batch_size=args.batch_size // 5, pin_memory=True,
+    test_data = torch.utils.data.DataLoader(test_data, batch_size=args.batch_size // 4, pin_memory=True,
                                             num_workers=min(multiprocessing.cpu_count(), 4))
-    train_data.mean = test_data.mean = torch.tensor([0.4802, 0.4481, 0.3975])
-    train_data.std = test_data.std = torch.tensor([0.2302, 0.2265, 0.2262])
+    train_data.mean = test_data.mean = torch.tensor([0.4815, 0.4578, 0.4082])
+    train_data.std = test_data.std = torch.tensor([0.2153, 0.2111, 0.2121])
 
     ## Step 3: wrap model with auto_LiRPA
     # The second parameter dummy_input is for constructing the trace of the computational graph.
-    model = BoundedModule(model_ori, dummy_input, bound_opts={'relu':args.bound_opts}, device=args.device)
+    model = BoundedModule(model_ori, dummy_input, bound_opts=args.bound_opts, device=args.device)
     model_loss = BoundedModule(CrossEntropyWrapper(model_ori), (dummy_input, torch.zeros(1, dtype=torch.long)),
                                bound_opts= { 'relu': args.bound_opts, 'loss_fusion': True }, device=args.device)
     model_loss = BoundDataParallel(model_loss)
@@ -269,9 +264,7 @@ def main(args):
     logger.log(str(model_ori))
 
     if args.load:
-        if opt_state:
-            opt.load_state_dict(opt_state)
-            logger.log('resume opt_state')
+        opt.load_state_dict(opt_state)
 
     # skip epochs
     if epoch > 0:
@@ -314,11 +307,12 @@ def main(args):
                 state_dict[name[6:]] = state_dict_loss[name]
 
             with torch.no_grad():
-                if int(eps_scheduler.params['start']) + int(eps_scheduler.params['length']) > t >= int(eps_scheduler.params['start']):
+                if int(eps_scheduler.params['start']) + int(eps_scheduler.params['length']) > t >= int(
+                        eps_scheduler.params['start']):
                     m = Train(model_loss, t, test_data, eps_scheduler, norm, False, None, args.bound_type, loss_fusion=True)
                 else:
                     model_ori.load_state_dict(state_dict)
-                    model = BoundedModule(model_ori, dummy_input, bound_opts={'relu':args.bound_opts}, device=args.device)
+                    model = BoundedModule(model_ori, dummy_input, bound_opts=args.bound_opts, device=args.device)
                     model = BoundDataParallel(model)
                     m = Train(model, t, test_data, eps_scheduler, norm, False, None, 'IBP', loss_fusion=False)
                     del model

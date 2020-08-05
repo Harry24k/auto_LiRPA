@@ -4,7 +4,7 @@ import argparse
 import torch.optim as optim
 from torch.nn import CrossEntropyLoss
 from auto_LiRPA import BoundedModule, CrossEntropyWrapper, BoundDataParallel, BoundedParameter
-from auto_LiRPA.bound_ops import BoundReLU, BoundExp
+from auto_LiRPA.bound_ops import BoundExp
 from auto_LiRPA.perturbations import *
 from auto_LiRPA.utils import MultiAverageMeter
 import torch.nn.functional as F

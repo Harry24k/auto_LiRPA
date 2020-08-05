@@ -2,6 +2,10 @@ import logging
 import pickle
 import time
 import torch
+import os
+import appdirs
+from oslo_concurrency import lockutils
+from oslo_concurrency import processutils
 from collections import defaultdict, Sequence, namedtuple
 
 # Special identity matrix. Avoid extra computation of identity matrix multiplication in various places.
@@ -15,6 +19,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# for debugging
+if False:
+    file_handler = logging.FileHandler('debug.log')
+    file_handler.setFormatter(logging.Formatter('%(levelname)-8s %(asctime)-12s %(message)s'))
+    logger.addHandler(file_handler)
+    logger.setLevel(logging.DEBUG)
+
+user_data_dir = appdirs.user_data_dir('auto_LiRPA')
+if not os.path.exists(user_data_dir):
+    os.mkdir(user_data_dir)
+lockutils.set_defaults(os.path.join(user_data_dir, '.lock'))
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -105,3 +121,16 @@ def recursive_map (seq, func):
             yield type(item)(recursive_map(item, func))
         else:
             yield func(item)
+
+# unpack tuple, dict, list into one single list
+# TODO: not sure if the order matches graph.inputs()
+def unpack_inputs(inputs):
+    if isinstance(inputs, dict):
+        inputs = list(inputs.values())
+    if isinstance(inputs, tuple) or isinstance(inputs, list):
+        res = []
+        for item in inputs: 
+            res += unpack_inputs(item)
+        return res
+    else:
+        return [inputs]
